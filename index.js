@@ -14,7 +14,7 @@ const token = process.env.TOKEN;
 const mytoken = process.env.MYTOKEN;
 const mongodbUri = process.env.MONGODB_URI;
 const phone_number_id = process.env.PHONE_NUMBER_ID;
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 80;
 
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
