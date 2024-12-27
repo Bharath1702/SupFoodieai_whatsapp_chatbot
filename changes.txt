@@ -1,0 +1,423 @@
+require('dotenv').config();
+const express = require("express");
+const bodyParser = require("body-parser");
+const axios = require("axios");
+const mongoose = require("mongoose");
+
+const app = express().use(bodyParser.json());
+
+const token = process.env.TOKEN;
+const mytoken = process.env.MYTOKEN;
+const mongodbUri = process.env.MONGODB_URI;
+const phone_number_id = process.env.PHONE_NUMBER_ID;
+const port = process.env.PORT || 3000;
+
+console.log('Environment Variables:');
+console.log('TOKEN:', token);
+console.log('MYTOKEN:', mytoken);
+console.log('MONGODB_URI:', mongodbUri);
+console.log('PHONE_NUMBER_ID:', phone_number_id);
+console.log('PORT:', port);
+
+if (!mongodbUri) {
+    console.error("MongoDB URI is not defined. Please check your .env file.");
+    process.exit(1);
+}
+
+// Connect to MongoDB
+mongoose.connect(mongodbUri, { useNewUrlParser: true, useUnifiedTopology: true })
+    .then(() => console.log('MongoDB connected'))
+    .catch(err => {
+        console.error('MongoDB connection error:', err);
+        process.exit(1);
+    });
+
+// Schema for orders
+const orderSchema = new mongoose.Schema({
+    sender: String,
+    items: [{
+        id: String,
+        title: String,
+        price: Number,
+        quantity: Number
+    }],
+    orderId: String,
+    totalAmount: Number,
+    date: { type: Date, default: Date.now },
+    status: {
+        type: String,
+        enum: ['Pending', 'Accepted', 'Rejected', 'Cooking', 'Ready', 'Cancelled'],
+        default: 'Pending'
+    },
+    lastNotifiedStatus: { type: String, default: 'Pending' }
+});
+
+// Polling function to check for status changes
+async function checkForOrderUpdates() {
+    console.log("Polling for order updates...");
+    try {
+        const orders = await Order.find({ $expr: { $ne: ["$status", "$lastNotifiedStatus"] } });
+        console.log(`Found ${orders.length} orders with updated statuses.`);
+        for (const order of orders) {
+            const currentStatus = order.status;
+            const lastNotifiedStatus = order.lastNotifiedStatus;
+            if (currentStatus !== lastNotifiedStatus) {
+                console.log(`Sending update for order ${order.orderId} with status: ${currentStatus}`);
+                await sendStatusUpdate(order.sender, order, currentStatus);
+                order.lastNotifiedStatus = currentStatus;
+                await order.save();
+            }
+        }
+    } catch (error) {
+        console.error('Error checking for order updates:', error);
+    }
+}
+setInterval(checkForOrderUpdates, 60000); // 1-minute interval
+
+// Function to send order status update
+async function sendStatusUpdate(sender, order, status) {
+    let message = '';
+    switch (status) {
+        case 'Accepted':
+            message = 'Your order has been accepted!';
+            break;
+        case 'Cooking':
+            message = 'Your food is being cooked!';
+            break;
+        case 'Ready':
+            message = 'Your order is ready for pickup!';
+            break;
+        case 'Rejected':
+            message = 'Unfortunately, your order was rejected.';
+            break;
+        case 'Cancelled':
+            message = 'Your order has been cancelled.';
+            break;
+        default:
+            message = 'There has been an update to your order status.';
+    }
+    await sendReply(sender, message);
+}
+
+// WhatsApp webhook setup
+app.get("/webhook", (req, res) => {
+    let mode = req.query["hub.mode"];
+    let challenge = req.query["hub.challenge"];
+    let token = req.query["hub.verify_token"];
+    if (mode && token) {
+        if (mode === "subscribe" && token === mytoken) {
+            res.status(200).send(challenge);
+        } else {
+            res.sendStatus(403);
+        }
+    }
+});
+
+app.post("/webhook", async (req, res) => {
+    try {
+        let body_param = req.body;
+        console.log(JSON.stringify(body_param, null, 2));
+        if (body_param.object) {
+            if (body_param.entry &&
+                body_param.entry[0].changes &&
+                body_param.entry[0].changes[0].value.messages &&
+                body_param.entry[0].changes[0].value.messages[0]
+            ) {
+                let phon_no_id = body_param.entry[0].changes[0].value.metadata.phone_number_id;
+                let from = body_param.entry[0].changes[0].value.messages[0].from;
+                let msg_body = (body_param.entry[0].changes[0].value.messages[0].interactive && body_param.entry[0].changes[0].value.messages[0].interactive.button_reply && body_param.entry[0].changes[0].value.messages[0].interactive.button_reply.id) ||
+                    (body_param.entry[0].changes[0].value.messages[0].interactive && body_param.entry[0].changes[0].value.messages[0].interactive.list_reply && body_param.entry[0].changes[0].value.messages[0].interactive.list_reply.id) ||
+                    body_param.entry[0].changes[0].value.messages[0].text.body;
+
+                await handleIncomingMessage(phon_no_id, from, msg_body);
+                res.sendStatus(200);
+            } else {
+                res.sendStatus(404);
+            }
+        }
+    } catch (error) {
+        console.error("Error handling webhook event: ", error);
+        res.sendStatus(500);
+    }
+});
+
+// Global variables for storing user state
+let awaitingHotelId = {};
+let awaitingQuantity = {};
+let awaitingOrderId = {};
+let orders = {};
+
+// Main function to handle incoming messages
+async function handleIncomingMessage(phon_no_id, sender, message) {
+    try {
+        if (!awaitingHotelId[sender]) {
+            if (message.length === 8 && !isNaN(message)) {
+                awaitingHotelId[sender] = message;
+                await sendReply(phon_no_id, sender, `Thank you! You have entered hotel ID: ${message}. Now you can view the menu or place an order.`);
+            } else {
+                await sendReply(phon_no_id, sender, "Please enter your 8-digit hotel ID to begin.");
+            }
+            return;
+        }
+
+        const hotelId = awaitingHotelId[sender]; // Retrieve the hotel ID for the user
+
+        if (awaitingQuantity[sender]) {
+            const item = awaitingQuantity[sender];
+            delete awaitingQuantity[sender];
+            if (message.startsWith('Qty_')) {
+                const quantity = parseInt(message.split('_')[1]);
+                if (!isNaN(quantity) && quantity > 0) {
+                    if (!orders[sender]) {
+                        orders[sender] = [];
+                    }
+                    const existingItem = orders[sender].find(i => i.id === item.id);
+                    if (existingItem) {
+                        existingItem.quantity += quantity;
+                    } else {
+                        orders[sender].push({ ...item, quantity });
+                    }
+                    await sendCatalog(phon_no_id, sender, `Added ${quantity} x ${item.title} to your order. What would you like to do next?`);
+                } else {
+                    await sendReply(phon_no_id, sender, 'Invalid quantity. Please select a valid number.');
+                    awaitingQuantity[sender] = item; // Re-prompt for quantity
+                }
+            } else {
+                await sendQuantityOptions(phon_no_id, sender, item);
+            }
+        } else if (message === 'ViewMenu') {
+            await sendMenu(phon_no_id, sender, hotelId); // Pass hotelId to view the correct menu
+        } else if (message === 'PlaceOrder') {
+            await sendOrderSummary(phon_no_id, sender, hotelId); // Pass hotelId to place the order in the correct collection
+        } else if (message.startsWith('Item_')) {
+            const itemId = message.split('_')[1];
+            const item = await fetchMenuItemById(hotelId, itemId);
+            if (item) {
+                awaitingQuantity[sender] = item;
+                await sendQuantityOptions(phon_no_id, sender, item);
+            }
+        } else {
+            await sendReply(phon_no_id, sender, "Sorry, I didn't understand that.\nPlease type 'Hi' to begin.");
+        }
+    } catch (error) {
+        console.error("Error handling incoming message: ", error);
+    }
+}
+
+// Fetch a single menu item from the correct hotel collection
+async function fetchMenuItemById(hotelId, itemId) {
+    const menuModelName = `menu_${hotelId}`;
+    const menuModel = mongoose.model(menuModelName, new mongoose.Schema({
+        id: Number,
+        title: String,
+        price: Number,
+    }), menuModelName);
+
+    const menuItem = await menuModel.findOne({ id: itemId });
+    return menuItem;
+}
+
+// Send a menu for the given hotel ID
+async function sendMenu(phon_no_id, sender, hotelId) {
+    try {
+        const menuModelName = `menu_${hotelId}`;
+        const menuModel = mongoose.model(menuModelName, new mongoose.Schema({
+            id: Number,
+            title: String,
+            price: Number,
+        }), menuModelName);
+
+        const menuItems = await menuModel.find(); // Fetch menu from the correct collection
+
+        const menuMessage = {
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: sender,
+            type: "interactive",
+            interactive: {
+                type: "list",
+                header: {
+                    type: "text",
+                    text: "MENU📄"
+                },
+                body: {
+                    text: `Please choose an item from Hotel ${hotelId}:`
+                },
+                footer: {
+                    text: "Select an item to add to your order"
+                },
+                action: {
+                    button: "Menu Items",
+                    sections: [
+                        {
+                            title: "Items",
+                            rows: menuItems.map(item => ({
+                                id: `Item_${item.id}`,
+                                title: item.title,
+                                description: `₹${item.price}`
+                            }))
+                        }
+                    ]
+                }
+            }
+        };
+
+        await sendReplyInteractive(phon_no_id, sender, menuMessage);
+    } catch (error) {
+        console.error(`Error fetching menu for hotel ${hotelId}:`, error);
+        await sendReply(phon_no_id, sender, 'Error fetching the menu. Please try again later.');
+    }
+}
+
+// Send order summary and place the order in the correct hotel's collection
+async function sendOrderSummary(phon_no_id, sender, hotelId) {
+    try {
+        let orderSummary = "Order Summary:\n";
+        let totalAmount = 0;
+        const orderId = generateOrderId();
+        orderSummary += `Order ID: ${orderId}\n\n`;
+
+        if (orders[sender] && orders[sender].length > 0) {
+            orders[sender].forEach(item => {
+                const itemTotal = item.price * item.quantity;
+                totalAmount += itemTotal;
+                orderSummary += `${item.title} x ${item.quantity} = ₹${itemTotal}\n`;
+            });
+            orderSummary += `Total Amount: ₹${totalAmount}\n`;
+
+            // Dynamically get the order model for this hotel
+            const orderModel = mongoose.model(`orders_${hotelId}`, new mongoose.Schema({
+                sender: String,
+                items: [{
+                    id: String,
+                    title: String,
+                    price: Number,
+                    quantity: Number
+                }],
+                orderId: String,
+                totalAmount: Number,
+                date: { type: Date, default: Date.now },
+                status: {
+                    type: String,
+                    enum: ['Pending', 'Accepted', 'Rejected', 'Cooking', 'Ready', 'Cancelled'],
+                    default: 'Pending'
+                },
+                lastNotifiedStatus: { type: String, default: 'Pending' }
+            }), `orders_${hotelId}`);
+
+            // Save order to the dynamically created collection for this hotel
+            const newOrder = new orderModel({
+                sender,
+                items: orders[sender],
+                orderId,
+                totalAmount
+            });
+            await newOrder.save();
+
+            // Clear the order
+            resetOrder(sender);
+
+        } else {
+            orderSummary = "You have no items in your order.\nSend 'hi' to order something";
+        }
+
+        await sendReplyWithButton(phon_no_id, sender, orderSummary);
+    } catch (error) {
+        console.error(`Error saving order for hotel ${hotelId}:`, error);
+        await sendReply(phon_no_id, sender, 'Error processing your order. Please try again later.');
+    }
+}
+
+// Function to reset the order after placing
+function resetOrder(sender) {
+    orders[sender] = [];
+    delete awaitingHotelId[sender]; // Clear the hotel ID for the user
+}
+
+// Function to send a message using WhatsApp API
+async function sendReply(phon_no_id, sender, message) {
+    try {
+        const response = await axios({
+            method: "POST",
+            url: `https://graph.facebook.com/v13.0/${phone_number_id}/messages?access_token=${token}`,
+            data: {
+                messaging_product: "whatsapp",
+                to: sender,
+                text: {
+                    body: message
+                }
+            },
+            headers: {
+                "Content-Type": "application/json"
+            }
+        });
+        console.log('Message sent successfully:', response.data);
+    } catch (error) {
+        console.error('Error sending message:', error.response ? error.response.data : error.message);
+    }
+}
+
+// Function to send an interactive message using WhatsApp API
+async function sendReplyInteractive(phon_no_id, sender, interactiveMessage) {
+    try {
+        const response = await axios({
+            method: "POST",
+            url: `https://graph.facebook.com/v13.0/${phon_no_id}/messages?access_token=${token}`,
+            data: interactiveMessage,
+            headers: {
+                "Content-Type": "application/json"
+            }
+        });
+        console.log('Interactive message sent:', response.data);
+    } catch (error) {
+        console.error('Error sending interactive message:', error.response ? error.response.data : error.message);
+    }
+}
+
+// Generate a random order ID
+function generateOrderId() {
+    return Math.floor(10000 + Math.random() * 90000).toString();
+}
+
+// Function to send a reply with buttons
+async function sendReplyWithButton(phon_no_id, sender, reply) {
+    const buttons = [
+        { type: "reply", reply: { id: "TrackOrderStatus", title: "Check Order Status" } },
+        { type: "reply", reply: { id: "MainMenu", title: "Main Menu" } }
+    ];
+
+    const message = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: sender,
+        type: "interactive",
+        interactive: {
+            type: "button",
+            body: {
+                text: reply
+            },
+            action: {
+                buttons: buttons
+            }
+        }
+    };
+
+    try {
+        const response = await axios({
+            method: "POST",
+            url: `https://graph.facebook.com/v13.0/${phon_no_id}/messages?access_token=${token}`,
+            data: message,
+            headers: {
+                "Content-Type": "application/json"
+            }
+        });
+        console.log('Message with button sent:', response.data);
+    } catch (error) {
+        console.error('Error sending message with button:', error.response ? error.response.data : error.message);
+    }
+}
+
+// Root route to ensure the app is up
+app.get("/", (req, res) => {
+    res.status(200).send(`Hello, this is webhook setup on port ${port}`);
+});
