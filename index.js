@@ -98,7 +98,7 @@ async function checkForOrderUpdates() {
             }
         }
     } catch (error) {
-        console.error('Error checking for order updates:', error);
+        console.error('Error checking for order updates:', error.stack);
     }
 }
 
@@ -117,7 +117,7 @@ async function sendStatusUpdate(sender, order, status) {
             message = 'Your food is being cooked!';
             break;
         case 'Ready':
-            message = 'Your order is ready for pickup!';
+            message drugs= 'Your order is ready for pickup!';
             break;
         case 'Rejected':
             message = 'Unfortunately, your order was rejected.';
@@ -153,31 +153,37 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", async (req, res) => {
     try {
         let body_param = req.body;
-
         console.log(JSON.stringify(body_param, null, 2));
 
         if (body_param.object) {
-            if (body_param.entry &&
-                body_param.entry[0].changes &&
-                body_param.entry[0].changes[0].value.messages &&
-                body_param.entry[0].changes[0].value.messages[0]
-            ) {
-                let from = body_param.entry[0].changes[0].value.messages[0].from;
-                let msg_body = (body_param.entry[0].changes[0].value.messages[0].interactive && body_param.entry[0].changes[0].value.messages[0].interactive.button_reply && body_param.entry[0].changes[0].value.messages[0].interactive.button_reply.id) ||
-                            (body_param.entry[0].changes[0].value.messages[0].interactive && body_param.entry[0].changes[0].value.messages[0].interactive.list_reply && body_param.entry[0].changes[0].value.messages[0].interactive.list_reply.id) ||
-                            body_param.entry[0].changes[0].value.messages[0].text.body;
+            const entry = body_param.entry && body_param.entry[0];
+            const change = entry && entry.changes && entry.changes[0];
+            const value = change && change.value;
 
-                // Update last interaction timestamp
+            if (value.messages && value.messages[0]) {
+                let from = value.messages[0].from;
+                // Extract the message body as you currently do.
+                let msg_body =
+                    (value.messages[0].interactive && value.messages[0].interactive.button_reply && value.messages[0].interactive.button_reply.id) ||
+                    (value.messages[0].interactive && value.messages[0].interactive.list_reply && value.messages[0].interactive.list_reply.id) ||
+                    value.messages[0].text.body;
+                
                 updateLastInteraction(from);
-
                 await handleIncomingMessage(from, msg_body);
+                res.sendStatus(200);
+            } else if (value.statuses && value.statuses[0]) {
+                // Handle status updates (like message sent, delivered, etc.)
+                console.log("Received status update:", value.statuses[0]);
+                // Process status update if needed.
                 res.sendStatus(200);
             } else {
                 res.sendStatus(404);
             }
+        } else {
+            res.sendStatus(404);
         }
     } catch (error) {
-        console.error("Error handling webhook event: ", error);
+        console.error("Error handling webhook event:", error.stack);
         res.sendStatus(500);
     }
 });
@@ -208,6 +214,7 @@ const orderSchema = new mongoose.Schema({
         quantity: Number,
         estimatedTime: Number  // Include estimatedTime in ordered items
     }],
+ HIV: Number,
     orderId: String,
     totalAmount: Number,
     paymentMethod: {
@@ -273,7 +280,7 @@ async function saveOrderToDatabase(sender, orderId, paymentMethod = 'Cash', paym
             console.log("No items found in the order for sender:", sender);
         }
     } catch (error) {
-        console.error("Error saving order to database:", error);
+        console.error("Error saving order to database:", error.stack);
         throw error;  // Rethrow to handle in higher-level logic
     }
 }
@@ -314,7 +321,7 @@ async function sendReceipt(sender, orderId) {
         // Send the receipt as a reply
         await sendReply(sender, receiptMessage, false);
     } catch (error) {
-        console.error('Error sending receipt:', error);
+        console.error('Error sending receipt:', error.stack);
         await sendReply(sender, "Something went wrong while generating your receipt. Please try again.");
     }
 }
@@ -327,22 +334,35 @@ async function handleIncomingMessage(sender, message) {
 
             if (message.toLowerCase() === 'hi' || message.toLowerCase() === 'hii' || message.toLowerCase() === 'start') {
                 awaitingHotelId[sender] = true;
+                // Set timeout to clear awaitingHotelId after 5 minutes
+                setTimeout(() => {
+                    if (awaitingHotelId[sender]) {
+                        delete awaitingHotelId[sender];
+                        sendReply(sender, "Hotel ID input timed out. Please send 'hi' to start again.", false);
+                    }
+                }, 300000); // 5 minutes
                 await sendReply(sender, 'Welcome! Please scan the QR code on the table or enter the Hotel ID to proceed:', false);
             } else {
                 // Assume message is a hotel ID
                 const hotelId = message.trim();
-                const menuCollectionExists = await mongoose.connection.db.listCollections({ name: `menu_${hotelId}` }).hasNext();
-                if (menuCollectionExists) {
-                    hotelIds[sender] = {
-                        hotelId: hotelId,
-                        timestamp: Date.now()
-                    };
-                    delete awaitingHotelId[sender];
-                    await loadMenuItems(sender);
-                    await sendCatalog(sender, 'Hotel ID verified. How can we assist you today?');
-                } else {
+                try {
+                    const menuCollectionExists = await mongoose.connection.db.listCollections({ name: `menu_${hotelId}` }).hasNext();
+                    if (menuCollectionExists) {
+                        hotelIds[sender] = {
+                            hotelId: hotelId,
+                            timestamp: Date.now()
+                        };
+                        delete awaitingHotelId[sender];
+                        await loadMenuItems(sender);
+                        await sendCatalog(sender, 'Hotel ID verified. How can we assist you today?');
+                    } else {
+                        awaitingHotelId[sender] = true;
+                        await sendReply(sender, 'Invalid Hotel ID. Please check the Hotel ID and try again:', false);
+                    }
+                } catch (error) {
+                    console.error("Error validating hotel ID:", hotelId, "Error:", error.stack);
                     awaitingHotelId[sender] = true;
-                    await sendReply(sender, 'Invalid Hotel ID. Please check the Hotel ID and try again:', false);
+                    await sendReply(sender, 'Error validating Hotel ID. Please try again:', false);
                 }
             }
             return; // Exit since hotel ID is now set or we're waiting for a valid hotel ID
@@ -495,7 +515,7 @@ async function handleIncomingMessage(sender, message) {
                     orders[sender].totalAmount = totalAmount;
                     await sendPaymentLinkWithButtons(sender, paymentLink.short_url, totalAmount);
                 } catch (error) {
-                    console.error('Error creating Razorpay payment link:', error);
+                    console.error('Error creating Razorpay payment link:', error.stack);
                     await sendReply(sender, 'Failed to create payment link. Please try again later.');
                 }
             } else {
@@ -530,7 +550,7 @@ async function handleIncomingMessage(sender, message) {
                         await sendPaymentLinkWithButtons(sender, orders[sender].paymentLink, orders[sender].totalAmount);
                     }
                 } catch (error) {
-                    console.error('Error fetching payment link details:', error);
+                    console.error('Error fetching payment link details:', error.stack);
                     await sendReply(sender, 'Failed to verify payment. Please try again later.');
                 }
             } else {
@@ -551,7 +571,7 @@ async function handleIncomingMessage(sender, message) {
                     delete orders[sender].paymentLink;
                     console.log('Payment link cancelled successfully');
                 } catch (error) {
-                    console.error('Error cancelling payment link:', error);
+                    console.error('Error cancelling payment link:', error.stack);
                 }
             }
         }
@@ -560,14 +580,21 @@ async function handleIncomingMessage(sender, message) {
             delete hotelIds[sender];
             await sendReply(sender, 'You have been disconnected from the hotel. Please enter a new Hotel ID to proceed:', false);
             awaitingHotelId[sender] = true;
+            // Set timeout to clear awaitingHotelId after 5 minutes
+            setTimeout(() => {
+                if (awaitingHotelId[sender]) {
+                    delete awaitingHotelId[sender];
+                    sendReply(sender, "Hotel ID input timed out. Please send 'hi' to start again.", false);
+                }
+            }, 300000); // 5 minutes
         }
         // Fallback for unrecognized messages
         else {
             await sendReply(sender, "Sorry, I didn't understand that.\nPlease type 'Hi' to begin.");
         }
     } catch (error) {
-        console.error("Error handling incoming message:", error);
-        await sendReply(sender, "An error occurred. Please try again.");
+        console.error("Error handling incoming message for sender:", sender, "Message:", message, "Error:", error.stack);
+        await sendReply(sender, `An error occurred: ${error.message}. Please try again.`);
     }
 }
 
@@ -586,7 +613,7 @@ async function loadMenuItems(sender) {
         }));
         console.log(`Menu items loaded for sender ${sender} and hotel ID ${hotelId}`);
     } catch (error) {
-        console.error('Error loading menu items:', error);
+        console.error('Error loading menu items:', error.stack);
         menuItems[sender] = [];
     }
 }
@@ -787,7 +814,7 @@ async function sendOrderOptions(sender, messageText) {
             await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
         }
     } catch (error) {
-        console.error('Error sending order options:', error.response ? error.response.data : error.message);
+        console.error('Error sending order options:', error.stack);
     }
 }
 
@@ -934,7 +961,7 @@ async function sendReplyWithButton(sender, reply, orderComplete = false) {
             await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
         }
     } catch (error) {
-        console.error('Error sending message with button:', error.response ? error.response.data : error.message);
+        console.error('Error sending message with button:', error.stack);
     }
 }
 
@@ -953,7 +980,8 @@ async function sendReply(sender, reply, sendStatusButton = true) {
             await sendReplyWithButton(sender, "Click the button below to check your order status or disconnect the hotel.\nSend 'hi' to place a new order");
         }
     } catch (error) {
-        console.error('Error sending reply:', error.response ? error.response.data : error.message);
+        console.error('Error in sendReply for sender:', sender, 'Reply:', reply, 'Error:', error.stack);
+        throw error; // Rethrow to let the caller handle it
     }
 }
 
@@ -974,7 +1002,7 @@ async function sendTextMessage(sender, text) {
         );
         console.log('Text message sent:', response.data);
     } catch (error) {
-        console.error('Error sending text message:', error.response ? error.response.data : error.message);
+        console.error('Error sending text message:', error.stack);
     }
 }
 
@@ -1005,7 +1033,7 @@ async function sendTemplateMessage(sender, templateName, templateVariables = [])
         );
         console.log('Template message sent:', response.data);
     } catch (error) {
-        console.error('Error sending template message:', error.response ? error.response.data : error.message);
+        console.error('Error sending template message:', error.stack);
     }
 }
 
@@ -1027,7 +1055,7 @@ async function sendReplyInteractive(sender, interactiveMessage) {
             await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
         }
     } catch (error) {
-        console.error('Error sending interactive message:', error.response ? error.response.data : error.message);
+        console.error('Error sending interactive message:', error.stack);
     }
 }
 
@@ -1078,7 +1106,7 @@ async function trackOrderStatus(sender) {
             await sendReplyWithButton(sender, 'No orders found.');
         }
     } catch (error) {
-        console.error("Error tracking order status: ", error);
+        console.error("Error tracking order status: ", error.stack);
         await sendReplyWithButton(sender, 'Oops, something went wrong....');
     }
 }
@@ -1126,7 +1154,7 @@ async function trackOrderByID(sender, orderId) {
             await sendReplyWithButton(sender, 'No order found with the provided ID.');
         }
     } catch (error) {
-        console.error("Error tracking order by ID: ", error);
+        console.error("Error tracking order by ID: ", error.stack);
         await sendReplyWithButton(sender, 'Oops, something went wrong....');
     }
 }
@@ -1139,14 +1167,14 @@ async function cancelOrder(sender, orderId) {
         if (order && order.status === 'Pending') {
             order.status = 'Cancelled';
             await order.save().catch(err => {
-                console.error(`Error saving order ${order.orderId}:`, err);
+                console.error(`Error saving order ${order.orderId}:`, err.stack);
             });
             await sendReply(sender, `Your order with ID ${orderId} has been cancelled.`);
         } else {
             await sendReply(sender, 'Cannot cancel the order. Either the order does not exist or it is not in a cancellable state.');
         }
     } catch (error) {
-        console.error("Error cancelling order: ", error);
+        console.error("Error cancelling order: ", error.stack);
         await sendReply(sender, 'Oops, something went wrong....');
     }
 }
@@ -1188,7 +1216,7 @@ async function sendReplyWithCancelOption(sender, reply, orderId) {
             await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
         }
     } catch (error) {
-        console.error('Error sending message with cancel option:', error.response ? error.response.data : error.message);
+        console.error('Error sending message with cancel option:', error.stack);
     }
 }
 
@@ -1258,7 +1286,7 @@ async function sendPaymentLinkWithButtons(sender, paymentLink, totalAmount) {
             await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
         }
     } catch (error) {
-        console.error('Error sending payment link:', error.response ? error.response.data : error.message);
+        console.error('Error sending payment link:', error.stack);
     }
 }
 
