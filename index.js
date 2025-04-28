@@ -308,12 +308,16 @@ async function sendReceipt(sender, orderId) {
 
         // Calculate average estimated time
         let totalEstimatedTime = 0;
-        let totalQuantity = 0;
-        order.items.forEach(item => {
-            totalEstimatedTime += item.estimatedTime * item.quantity;
-            totalQuantity += item.quantity;
-        });
-        const averageEstimatedTime = Math.ceil(totalEstimatedTime / totalQuantity);
+let totalQuantity = 0;
+let maxEstimatedTime = 0;
+
+order.items.forEach(item => {
+    totalEstimatedTime += item.estimatedTime * item.quantity;
+    totalQuantity += item.quantity;
+    maxEstimatedTime = Math.max(maxEstimatedTime, item.estimatedTime);
+});
+
+const averageEstimatedTime = Math.ceil(maxEstimatedTime);
         receiptMessage += `*Your Order Will Be Ready in* : ${averageEstimatedTime} minutes\n`;
 
         receiptMessage += `\nThank you for your order!`;
