@@ -117,7 +117,7 @@ async function sendStatusUpdate(sender, order, status) {
             message = 'Your food is being cooked!';
             break;
         case 'Ready':
-            message drugs= 'Your order is ready for pickup!';
+            message = 'Your order is ready for pickup!';
             break;
         case 'Rejected':
             message = 'Unfortunately, your order was rejected.';
@@ -214,7 +214,6 @@ const orderSchema = new mongoose.Schema({
         quantity: Number,
         estimatedTime: Number  // Include estimatedTime in ordered items
     }],
- HIV: Number,
     orderId: String,
     totalAmount: Number,
     paymentMethod: {
@@ -755,7 +754,7 @@ async function sendMenu(sender, extraMessage = '') {
                     footer: {
                         text: "Select an item to add to your order"
                     },
-                    action: {
+urri: {
                         button: "Menu Items",
                         sections: [
                             {
