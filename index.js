@@ -1,4 +1,4 @@
-// File: app.js
+// File: index.js
 
 require('dotenv').config();
 const express = require("express");
@@ -627,10 +627,10 @@ async function sendQuantityOptions(sender, item) {
             type: "list",
             header: {
                 type: "text",
-                text: `Select quantity for ${item.title}`
+                text: `Select quantity for ${item.title.substring(0, 24)}`
             },
             body: {
-                text: `Choose a quantity for ${item.title}:`
+                text: `Choose a quantity for ${item.title.substring(0, 24)}:`
             },
             action: {
                 button: "Select Quantity",
@@ -706,7 +706,6 @@ async function sendCatalog(sender, extraMessage = 'How can we assist you today?'
     await sendReplyInteractive(sender, catalogMessage);
 }
 
-// Modified sendMenu function to display menu category-wise and handle more than 10 items
 async function sendMenu(sender, extraMessage = '') {
     const items = menuItems[sender];
     if (!items || items.length === 0) {
@@ -723,9 +722,9 @@ async function sendMenu(sender, extraMessage = '') {
         categories[item.category].push(item);
     });
 
-    // Note: We need to send only one message per category with up to 10 items per list
     for (const category in categories) {
         const categoryItems = categories[category];
+        if (categoryItems.length === 0) continue; // Skip empty categories
 
         // Split category items into chunks of 10
         const itemChunks = [];
@@ -735,7 +734,13 @@ async function sendMenu(sender, extraMessage = '') {
 
         for (let chunkIndex = 0; chunkIndex < itemChunks.length; chunkIndex++) {
             const chunk = itemChunks[chunkIndex];
-            const sectionTitle = chunk.length > 1 ? `Page ${chunkIndex + 1}` : '';
+            if (chunk.length === 0) continue; // Skip empty chunks
+
+            // Ensure sectionTitle is non-empty
+            const sectionTitle = chunk.length > 1 ? `Page ${chunkIndex + 1}` : `${category} Items`;
+
+            // Sanitize category name and ensure it's valid
+            const safeCategory = category.replace(/[^a-zA-Z0-9\s]/g, '').substring(0, 24);
 
             const menuMessage = {
                 messaging_product: "whatsapp",
@@ -746,22 +751,22 @@ async function sendMenu(sender, extraMessage = '') {
                     type: "list",
                     header: {
                         type: "text",
-                        text: category
+                        text: safeCategory || "Menu Category"
                     },
                     body: {
-                        text: `Please choose an item from ${category}:`
+                        text: `Please choose an item from ${safeCategory}:`
                     },
                     footer: {
                         text: "Select an item to add to your order"
                     },
-urri: {
+                    action: {
                         button: "Menu Items",
                         sections: [
                             {
                                 title: sectionTitle,
                                 rows: chunk.map(item => ({
                                     id: `Item_${item.id}`,
-                                    title: item.title,
+                                    title: item.title.substring(0, 24).replace(/[^a-zA-Z0-9\s]/g, ''), // Truncate and sanitize
                                     description: `₹${item.price}`
                                 }))
                             }
@@ -770,12 +775,12 @@ urri: {
                 }
             };
 
+            console.log('Sending menu message payload:', JSON.stringify(menuMessage, null, 2));
             await sendReplyInteractive(sender, menuMessage);
         }
     }
 }
 
-// Function to send 'Place Order' and 'Edit Order' buttons
 async function sendOrderOptions(sender, messageText) {
     const message = {
         messaging_product: "whatsapp",
@@ -809,8 +814,7 @@ async function sendOrderOptions(sender, messageText) {
             });
             console.log('Order options sent:', response.data);
         } else {
-            // Send a template message to re-engage the user
-            await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
+            await sendTemplateMessage(sender, 'your_template_name');
         }
     } catch (error) {
         console.error('Error sending order options:', error.stack);
@@ -847,7 +851,7 @@ async function sendEditOrderOptions(sender) {
                         title: "Current Order",
                         rows: order.map(item => ({
                             id: `Remove_${item.id}`,
-                            title: item.title,
+                            title: item.title.substring(0, 24),
                             description: `Quantity: ${item.quantity}`
                         }))
                     }
@@ -956,8 +960,7 @@ async function sendReplyWithButton(sender, reply, orderComplete = false) {
             });
             console.log('Message with button sent:', response.data);
         } else {
-            // Send a template message to re-engage the user
-            await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
+            await sendTemplateMessage(sender, 'your_template_name');
         }
     } catch (error) {
         console.error('Error sending message with button:', error.stack);
@@ -972,7 +975,7 @@ async function sendReply(sender, reply, sendStatusButton = true) {
             await sendTextMessage(sender, reply);
         } else {
             // Send a template message
-            await sendTemplateMessage(sender, 'your_template_name');  // Replace 'your_template_name' with your actual template name
+            await sendTemplateMessage(sender, 'your_template_name');
         }
 
         if (sendStatusButton) {
@@ -1050,11 +1053,17 @@ async function sendReplyInteractive(sender, interactiveMessage) {
             });
             console.log('Interactive message sent:', response.data);
         } else {
-            // Send a template message to re-engage the user
-            await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
+            await sendTemplateMessage(sender, 'your_template_name');
         }
     } catch (error) {
-        console.error('Error sending interactive message:', error.stack);
+        console.error('Error sending interactive message:', {
+            error: error.message,
+            status: error.response?.status,
+            data: error.response?.data,
+            stack: error.stack,
+            payload: JSON.stringify(interactiveMessage, null, 2)
+        });
+        throw error; // Rethrow to allow upstream handling
     }
 }
 
@@ -1211,8 +1220,7 @@ async function sendReplyWithCancelOption(sender, reply, orderId) {
             });
             console.log('Message with cancel option sent:', response.data);
         } else {
-            // Send a template message to re-engage the user
-            await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
+            await sendTemplateMessage(sender, 'your_template_name');
         }
     } catch (error) {
         console.error('Error sending message with cancel option:', error.stack);
@@ -1281,8 +1289,7 @@ async function sendPaymentLinkWithButtons(sender, paymentLink, totalAmount) {
             });
             console.log('Payment link sent successfully:', response.data);
         } else {
-            // Send a template message to re-engage the user
-            await sendTemplateMessage(sender, 'your_template_name');  // Replace with your template name
+            await sendTemplateMessage(sender, 'your_template_name');
         }
     } catch (error) {
         console.error('Error sending payment link:', error.stack);
