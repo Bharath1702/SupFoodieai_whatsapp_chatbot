@@ -153,41 +153,34 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", async (req, res) => {
     try {
         let body_param = req.body;
+
         console.log(JSON.stringify(body_param, null, 2));
 
         if (body_param.object) {
-            const entry = body_param.entry && body_param.entry[0];
-            const change = entry && entry.changes && entry.changes[0];
-            const value = change && change.value;
+            if (body_param.entry &&
+                body_param.entry[0].changes &&
+                body_param.entry[0].changes[0].value.messages &&
+                body_param.entry[0].changes[0].value.messages[0]
+            ) {
+                let from = body_param.entry[0].changes[0].value.messages[0].from;
+                let msg_body = (body_param.entry[0].changes[0].value.messages[0].interactive && body_param.entry[0].changes[0].value.messages[0].interactive.button_reply && body_param.entry[0].changes[0].value.messages[0].interactive.button_reply.id) ||
+                            (body_param.entry[0].changes[0].value.messages[0].interactive && body_param.entry[0].changes[0].value.messages[0].interactive.list_reply && body_param.entry[0].changes[0].value.messages[0].interactive.list_reply.id) ||
+                            body_param.entry[0].changes[0].value.messages[0].text.body;
 
-            if (value.messages && value.messages[0]) {
-                let from = value.messages[0].from;
-                // Extract the message body as you currently do.
-                let msg_body =
-                    (value.messages[0].interactive && value.messages[0].interactive.button_reply && value.messages[0].interactive.button_reply.id) ||
-                    (value.messages[0].interactive && value.messages[0].interactive.list_reply && value.messages[0].interactive.list_reply.id) ||
-                    value.messages[0].text.body;
-                
+                // Update last interaction timestamp
                 updateLastInteraction(from);
+
                 await handleIncomingMessage(from, msg_body);
-                res.sendStatus(200);
-            } else if (value.statuses && value.statuses[0]) {
-                // Handle status updates (like message sent, delivered, etc.)
-                console.log("Received status update:", value.statuses[0]);
-                // Process status update if needed.
                 res.sendStatus(200);
             } else {
                 res.sendStatus(404);
             }
-        } else {
-            res.sendStatus(404);
         }
     } catch (error) {
-        console.error("Error handling webhook event:", error);
+        console.error("Error handling webhook event: ", error);
         res.sendStatus(500);
     }
 });
-
 
 // Update Menu Item Schema to include availability and estimatedTime
 const menuItemSchema = new mongoose.Schema({
